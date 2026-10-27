@@ -5,6 +5,7 @@ package mocks
 import (
 	config "github.com/newscred/webhook-broker/config"
 	data "github.com/newscred/webhook-broker/storage/data"
+
 	mock "github.com/stretchr/testify/mock"
 )
 

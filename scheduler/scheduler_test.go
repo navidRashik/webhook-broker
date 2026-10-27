@@ -2,15 +2,15 @@ package scheduler
 
 import (
 	"errors"
+	"testing"
+	"time"
+
 	dispatcherMocks "github.com/newscred/webhook-broker/dispatcher/mocks"
 	"github.com/newscred/webhook-broker/storage"
 	"github.com/newscred/webhook-broker/storage/data"
 	"github.com/newscred/webhook-broker/storage/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"sync"
-	"testing"
-	"time"
 )
 
 type mockSchedulerConfig struct {
@@ -31,123 +31,51 @@ func (m *mockSchedulerConfig) GetSchedulerBatchSize() int {
 	return m.schedulerBatchSize
 }
 
+func defaultMockSchedulerConfig() *mockSchedulerConfig {
+	return &mockSchedulerConfig{
+		schedulerIntervalMs: 5 * time.Millisecond,
+		minScheduleDelay:    2 * time.Minute,
+		schedulerBatchSize:  10,
+	}
+}
+
 func TestNewMessageScheduler(t *testing.T) {
+	scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
+	dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
+	schedulerCfg := defaultMockSchedulerConfig()
+	lockRepo := &mocks.LockRepository{}
+
 	t.Run("valid configuration", func(t *testing.T) {
-		// Arrange
-		scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
-		msgRepo := &mocks.MessageRepository{}
-		dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
-		schedulerCfg := &mockSchedulerConfig{
-			schedulerIntervalMs: 5 * time.Millisecond,
-			minScheduleDelay:    2 * time.Minute,
-			schedulerBatchSize:  10,
-		}
-		lockRepo := &mocks.LockRepository{}
-
-		// Act
-		scheduler := NewMessageScheduler(&SchedulerConfiguration{
-			ScheduledMsgRepo: scheduledMsgRepo,
-			MsgRepo:          msgRepo,
-			DispatcherSvc:    dispatcherSvc,
-			SchedulerCfg:     schedulerCfg,
-			LockRepo:         lockRepo,
-		})
-
-		// Assert
-		assert.NotNil(t, scheduler)
+		assert.NotNil(t, NewMessageScheduler(NewSchedulerConfiguration(scheduledMsgRepo, dispatcherSvc, lockRepo, schedulerCfg)))
 	})
 
 	t.Run("nil configuration", func(t *testing.T) {
-		// Arrange
-		scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
-		msgRepo := &mocks.MessageRepository{}
-		dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
-		schedulerCfg := &mockSchedulerConfig{}
-		lockRepo := &mocks.LockRepository{}
-
-		// Act & Assert
 		assert.Panics(t, func() {
-			NewMessageScheduler(&SchedulerConfiguration{
-				ScheduledMsgRepo: nil,
-				MsgRepo:          msgRepo,
-				DispatcherSvc:    dispatcherSvc,
-				SchedulerCfg:     schedulerCfg,
-				LockRepo:         lockRepo,
-			})
+			NewMessageScheduler(&SchedulerConfiguration{DispatcherSvc: dispatcherSvc, SchedulerCfg: schedulerCfg, LockRepo: lockRepo})
 		})
-
 		assert.Panics(t, func() {
-			NewMessageScheduler(&SchedulerConfiguration{
-				ScheduledMsgRepo: scheduledMsgRepo,
-				MsgRepo:          nil,
-				DispatcherSvc:    dispatcherSvc,
-				SchedulerCfg:     schedulerCfg,
-				LockRepo:         lockRepo,
-			})
+			NewMessageScheduler(&SchedulerConfiguration{ScheduledMsgRepo: scheduledMsgRepo, SchedulerCfg: schedulerCfg, LockRepo: lockRepo})
 		})
-
 		assert.Panics(t, func() {
-			NewMessageScheduler(&SchedulerConfiguration{
-				ScheduledMsgRepo: scheduledMsgRepo,
-				MsgRepo:          msgRepo,
-				DispatcherSvc:    nil,
-				SchedulerCfg:     schedulerCfg,
-				LockRepo:         lockRepo,
-			})
+			NewMessageScheduler(&SchedulerConfiguration{ScheduledMsgRepo: scheduledMsgRepo, DispatcherSvc: dispatcherSvc, LockRepo: lockRepo})
 		})
-
 		assert.Panics(t, func() {
-			NewMessageScheduler(&SchedulerConfiguration{
-				ScheduledMsgRepo: scheduledMsgRepo,
-				MsgRepo:          msgRepo,
-				DispatcherSvc:    dispatcherSvc,
-				SchedulerCfg:     nil,
-				LockRepo:         lockRepo,
-			})
-		})
-
-		assert.Panics(t, func() {
-			NewMessageScheduler(&SchedulerConfiguration{
-				ScheduledMsgRepo: scheduledMsgRepo,
-				MsgRepo:          msgRepo,
-				DispatcherSvc:    dispatcherSvc,
-				SchedulerCfg:     schedulerCfg,
-				LockRepo:         nil,
-			})
+			NewMessageScheduler(&SchedulerConfiguration{ScheduledMsgRepo: scheduledMsgRepo, DispatcherSvc: dispatcherSvc, SchedulerCfg: schedulerCfg})
 		})
 	})
 }
 
 func TestStartStop(t *testing.T) {
-	// Arrange
 	scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
-	msgRepo := &mocks.MessageRepository{}
-	dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
-	schedulerCfg := &mockSchedulerConfig{
-		schedulerIntervalMs: 5 * time.Millisecond,
-		minScheduleDelay:    2 * time.Minute,
-		schedulerBatchSize:  10,
-	}
-	lockRepo := &mocks.LockRepository{}
+	scheduledMsgRepo.On("GetMessagesReadyForDispatch", 10).Return([]*data.ScheduledMessage{})
 
-	// Need to mock the GetAndClaimMessagesForDispatch method to avoid panic
-	scheduledMsgRepo.On("GetAndClaimMessagesForDispatch", 10).Return([]*data.ScheduledMessage{}, nil)
+	scheduler := NewMessageScheduler(NewSchedulerConfiguration(scheduledMsgRepo, &dispatcherMocks.MessageDispatcher{}, &mocks.LockRepository{}, defaultMockSchedulerConfig()))
 
-	scheduler := NewMessageScheduler(&SchedulerConfiguration{
-		ScheduledMsgRepo: scheduledMsgRepo,
-		MsgRepo:          msgRepo,
-		DispatcherSvc:    dispatcherSvc,
-		SchedulerCfg:     schedulerCfg,
-		LockRepo:         lockRepo,
-	})
-
-	// Act
 	scheduler.Start()
-	time.Sleep(10 * time.Millisecond) // Give it time to start
+	time.Sleep(10 * time.Millisecond)
 	scheduler.Stop()
 
-	// Assert - If it didn't hang, the test passes
-	scheduledMsgRepo.AssertCalled(t, "GetAndClaimMessagesForDispatch", 10)
+	scheduledMsgRepo.AssertCalled(t, "GetMessagesReadyForDispatch", 10)
 }
 
 func createTestScheduledMessage(t *testing.T) *data.ScheduledMessage {
@@ -165,196 +93,96 @@ func createTestScheduledMessage(t *testing.T) *data.ScheduledMessage {
 	return scheduledMsg
 }
 
-func TestProcessScheduledMessages(t *testing.T) {
-	// Arrange
+// newMockedScheduler returns a scheduler whose lock is always granted and whose re-read under the lock
+// reports currentStatus for the scheduled message.
+func newMockedScheduler(t *testing.T, scheduledMsg *data.ScheduledMessage, currentStatus data.ScheduledMsgStatus) (*MessageSchedulerImpl, *mocks.ScheduledMessageRepository, *dispatcherMocks.MessageDispatcher) {
 	scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
-	msgRepo := &mocks.MessageRepository{}
 	dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
-	schedulerCfg := &mockSchedulerConfig{
-		schedulerIntervalMs: 50 * time.Millisecond,
-		minScheduleDelay:    2 * time.Minute,
-		schedulerBatchSize:  10,
-	}
 	lockRepo := &mocks.LockRepository{}
-
-	// Create test objects
-	scheduledMsg := createTestScheduledMessage(t)
-	// Mark as already dispatched (since GetAndClaimMessagesForDispatch does this)
-	scheduledMsg.Status = data.ScheduledMsgStatusDispatched
-	scheduledMsg.DispatchedAt = time.Now()
-
-	// Set up expectations
-	scheduledMsgRepo.On("GetAndClaimMessagesForDispatch", 10).Return([]*data.ScheduledMessage{scheduledMsg}, nil)
-
-	// For locking
 	lockRepo.On("TryLock", mock.Anything).Return(nil)
 	lockRepo.On("ReleaseLock", mock.Anything).Return(nil)
 
-	// For message creation and dispatching
-	msgRepo.On("Create", mock.MatchedBy(func(msg *data.Message) bool {
+	current := *scheduledMsg
+	current.Status = currentStatus
+	scheduledMsgRepo.On("GetByID", scheduledMsg.ID.String()).Return(&current, nil)
+
+	scheduler := NewMessageScheduler(NewSchedulerConfiguration(scheduledMsgRepo, dispatcherSvc, lockRepo, defaultMockSchedulerConfig()))
+	return scheduler.(*MessageSchedulerImpl), scheduledMsgRepo, dispatcherSvc
+}
+
+func TestProcessScheduledMessages(t *testing.T) {
+	scheduledMsg := createTestScheduledMessage(t)
+	impl, scheduledMsgRepo, dispatcherSvc := newMockedScheduler(t, scheduledMsg, data.ScheduledMsgStatusScheduled)
+	scheduledMsgRepo.On("GetMessagesReadyForDispatch", 10).Return([]*data.ScheduledMessage{scheduledMsg})
+	scheduledMsgRepo.On("DispatchAsMessage", scheduledMsg, mock.MatchedBy(func(msg *data.Message) bool {
 		return msg.MessageID == "test-message-id"
 	})).Return(nil)
 
-	// No need to mock MarkDispatched since GetAndClaimMessagesForDispatch already handles it
-
-	// Add synchronization to ensure we can verify the call was made
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-
-	// Replace Dispatch with a function that signals when it's called
+	dispatched := make(chan struct{})
 	dispatcherSvc.On("Dispatch", mock.MatchedBy(func(msg *data.Message) bool {
 		return msg.MessageID == "test-message-id"
-	})).Run(func(args mock.Arguments) {
-		wg.Done()
-	}).Return()
+	})).Run(func(args mock.Arguments) { close(dispatched) }).Return()
 
-	// Create the scheduler
-	scheduler := NewMessageScheduler(&SchedulerConfiguration{
-		ScheduledMsgRepo: scheduledMsgRepo,
-		MsgRepo:          msgRepo,
-		DispatcherSvc:    dispatcherSvc,
-		SchedulerCfg:     schedulerCfg,
-		LockRepo:         lockRepo,
-	})
-
-	// Act - directly call process rather than using the scheduler goroutine
-	impl := scheduler.(*MessageSchedulerImpl)
 	impl.processScheduledMessages()
 
-	// Wait for dispatch to be called or timeout
-	timeoutChan := time.After(200 * time.Millisecond)
-	doneChan := make(chan struct{})
-
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	// Wait for either completion or timeout
 	select {
-	case <-doneChan:
-		// Success!
-	case <-timeoutChan:
+	case <-dispatched:
+	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Timed out waiting for dispatch to be called")
 	}
-
-	// Assert
-	msgRepo.AssertCalled(t, "Create", mock.Anything)
-	// No longer calling MarkDispatched since GetAndClaimMessagesForDispatch handles it
-	dispatcherSvc.AssertCalled(t, "Dispatch", mock.Anything)
+	assert.Equal(t, data.ScheduledMsgStatusDispatched, scheduledMsg.Status)
 }
 
-func TestRaceConditionHandling(t *testing.T) {
-	// Arrange
-	scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
-	msgRepo := &mocks.MessageRepository{}
-	dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
-	schedulerCfg := &mockSchedulerConfig{
-		schedulerIntervalMs: 5 * time.Millisecond,
-		minScheduleDelay:    2 * time.Minute,
-		schedulerBatchSize:  10,
-	}
-	lockRepo := &mocks.LockRepository{}
-
-	// Create test objects
+func TestAlreadyDispatchedMessageIsSkipped(t *testing.T) {
 	scheduledMsg := createTestScheduledMessage(t)
-	// Mark as already dispatched (since GetAndClaimMessagesForDispatch does this)
-	scheduledMsg.Status = data.ScheduledMsgStatusDispatched
-	scheduledMsg.DispatchedAt = time.Now()
+	impl, scheduledMsgRepo, dispatcherSvc := newMockedScheduler(t, scheduledMsg, data.ScheduledMsgStatusDispatched)
 
-	// Set up expectations
-	scheduledMsgRepo.On("GetAndClaimMessagesForDispatch", 10).Return([]*data.ScheduledMessage{scheduledMsg}, nil)
+	impl.dispatchMessage(scheduledMsg)
 
-	// For locking
-	lockRepo.On("TryLock", mock.Anything).Return(nil)
-	lockRepo.On("ReleaseLock", mock.Anything).Return(nil)
-
-	// Simulate duplicate message ID error (defense-in-depth scenario)
-	msgRepo.On("Create", mock.MatchedBy(func(msg *data.Message) bool {
-		return msg.MessageID == "test-message-id"
-	})).Return(storage.ErrDuplicateMessageIDForChannel)
-
-	// Return the message when checking status
-	scheduledMsgRepo.On("GetByID", scheduledMsg.ID.String()).Return(scheduledMsg, nil)
-
-	// Create the scheduler
-	scheduler := NewMessageScheduler(&SchedulerConfiguration{
-		ScheduledMsgRepo: scheduledMsgRepo,
-		MsgRepo:          msgRepo,
-		DispatcherSvc:    dispatcherSvc,
-		SchedulerCfg:     schedulerCfg,
-		LockRepo:         lockRepo,
-	})
-
-	// Act
-	impl := scheduler.(*MessageSchedulerImpl)
-	impl.processScheduledMessages()
-
-	// Give time for goroutines to complete
-	time.Sleep(200 * time.Millisecond)
-
-	// Assert
-	msgRepo.AssertCalled(t, "Create", mock.Anything)
-	scheduledMsgRepo.AssertCalled(t, "GetByID", scheduledMsg.ID.String())
-
-	// Dispatch should not be called due to error
+	scheduledMsgRepo.AssertNotCalled(t, "DispatchAsMessage", mock.Anything, mock.Anything)
 	dispatcherSvc.AssertNotCalled(t, "Dispatch", mock.Anything)
+	assert.Equal(t, uint64(0), impl.metricsCollector.SchedulingErrors)
+}
+
+func TestDispatchedByAnotherReplicaAfterReRead(t *testing.T) {
+	scheduledMsg := createTestScheduledMessage(t)
+	impl, scheduledMsgRepo, dispatcherSvc := newMockedScheduler(t, scheduledMsg, data.ScheduledMsgStatusScheduled)
+	scheduledMsgRepo.On("DispatchAsMessage", scheduledMsg, mock.Anything).Return(storage.ErrNoRowsUpdated)
+
+	impl.dispatchMessage(scheduledMsg)
+
+	dispatcherSvc.AssertNotCalled(t, "Dispatch", mock.Anything)
+	assert.Equal(t, uint64(0), impl.metricsCollector.SchedulingErrors)
 }
 
 func TestErrorHandling(t *testing.T) {
-	// Arrange
-	scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
-	msgRepo := &mocks.MessageRepository{}
-	dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
-	schedulerCfg := &mockSchedulerConfig{
-		schedulerIntervalMs: 5 * time.Millisecond,
-		minScheduleDelay:    2 * time.Minute,
-		schedulerBatchSize:  10,
-	}
-	lockRepo := &mocks.LockRepository{}
+	t.Run("ReReadFails", func(t *testing.T) {
+		scheduledMsg := createTestScheduledMessage(t)
+		scheduledMsgRepo := &mocks.ScheduledMessageRepository{}
+		dispatcherSvc := &dispatcherMocks.MessageDispatcher{}
+		lockRepo := &mocks.LockRepository{}
+		lockRepo.On("TryLock", mock.Anything).Return(nil)
+		lockRepo.On("ReleaseLock", mock.Anything).Return(nil)
+		scheduledMsgRepo.On("GetByID", scheduledMsg.ID.String()).Return(nil, errors.New("database error"))
+		impl := NewMessageScheduler(NewSchedulerConfiguration(scheduledMsgRepo, dispatcherSvc, lockRepo, defaultMockSchedulerConfig())).(*MessageSchedulerImpl)
 
-	// Create test objects
-	scheduledMsg := createTestScheduledMessage(t)
-	// Mark as already dispatched (since GetAndClaimMessagesForDispatch does this)
-	scheduledMsg.Status = data.ScheduledMsgStatusDispatched
-	scheduledMsg.DispatchedAt = time.Now()
+		impl.dispatchMessage(scheduledMsg)
 
-	// Set up expectations
-	scheduledMsgRepo.On("GetAndClaimMessagesForDispatch", 10).Return([]*data.ScheduledMessage{scheduledMsg}, nil)
-
-	// For locking
-	lockRepo.On("TryLock", mock.Anything).Return(nil)
-	lockRepo.On("ReleaseLock", mock.Anything).Return(nil)
-
-	// Test database error
-	msgRepo.On("Create", mock.MatchedBy(func(msg *data.Message) bool {
-		return msg.MessageID == "test-message-id"
-	})).Return(errors.New("database error"))
-
-	// Create the scheduler
-	scheduler := NewMessageScheduler(&SchedulerConfiguration{
-		ScheduledMsgRepo: scheduledMsgRepo,
-		MsgRepo:          msgRepo,
-		DispatcherSvc:    dispatcherSvc,
-		SchedulerCfg:     schedulerCfg,
-		LockRepo:         lockRepo,
+		scheduledMsgRepo.AssertNotCalled(t, "DispatchAsMessage", mock.Anything, mock.Anything)
+		dispatcherSvc.AssertNotCalled(t, "Dispatch", mock.Anything)
+		assert.Equal(t, uint64(1), impl.metricsCollector.SchedulingErrors)
 	})
 
-	// Act
-	impl := scheduler.(*MessageSchedulerImpl)
-	impl.processScheduledMessages()
+	t.Run("WriteFails", func(t *testing.T) {
+		scheduledMsg := createTestScheduledMessage(t)
+		impl, scheduledMsgRepo, dispatcherSvc := newMockedScheduler(t, scheduledMsg, data.ScheduledMsgStatusScheduled)
+		scheduledMsgRepo.On("DispatchAsMessage", scheduledMsg, mock.Anything).Return(errors.New("database error"))
 
-	// Give time for goroutines to complete
-	time.Sleep(200 * time.Millisecond)
+		impl.dispatchMessage(scheduledMsg)
 
-	// Assert
-	msgRepo.AssertCalled(t, "Create", mock.Anything)
-
-	// Dispatch should not be called due to error
-	dispatcherSvc.AssertNotCalled(t, "Dispatch", mock.Anything)
-
-	// Metrics should have recorded an error
-	assert.Greater(t, impl.metricsCollector.SchedulingErrors, uint64(0))
+		dispatcherSvc.AssertNotCalled(t, "Dispatch", mock.Anything)
+		assert.Equal(t, uint64(1), impl.metricsCollector.SchedulingErrors)
+	})
 }
 
 func TestMetrics(t *testing.T) {

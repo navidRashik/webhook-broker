@@ -101,6 +101,23 @@ func (msgRepo *ScheduledMessageDBRepository) MarkDispatched(message *data.Schedu
 	return err
 }
 
+// DispatchAsMessage marks a SCHEDULED scheduled message as DISPATCHED and inserts its regular message in one
+// transaction, so either both rows change or neither does. It returns ErrNoRowsUpdated, writing nothing, when
+// the scheduled message is no longer in SCHEDULED status.
+func (msgRepo *ScheduledMessageDBRepository) DispatchAsMessage(scheduledMsg *data.ScheduledMessage, message *data.Message) error {
+	if scheduledMsg.Status != data.ScheduledMsgStatusDispatched {
+		return fmt.Errorf("can only mark scheduled messages with status DISPATCHED; current status - %v", scheduledMsg.Status)
+	}
+	if !message.IsInValidState() {
+		return data.ErrInsufficientInformationForCreating
+	}
+	err := transactionalWrites(msgRepo.db,
+		getTxWrapperForSingleWriteQuery(emptyOps, "UPDATE scheduled_message SET status = ?, dispatchedAt = ?, updatedAt = ? WHERE id = ? AND status = ?",
+			args2SliceFnWrapper(scheduledMsg.Status, scheduledMsg.DispatchedAt, time.Now(), scheduledMsg.ID, data.ScheduledMsgStatusScheduled)),
+		getTxWrapperForSingleWriteQuery(emptyOps, messageInsertQuery, messageInsertArgs(message)))
+	return normalizeDBError(err, mysqlErrorMap)
+}
+
 // GetMessagesReadyForDispatch retrieves scheduled messages that are ready to be dispatched
 func (msgRepo *ScheduledMessageDBRepository) GetMessagesReadyForDispatch(limit int) []*data.ScheduledMessage {
 	var messages []*data.ScheduledMessage
@@ -138,131 +155,6 @@ func (msgRepo *ScheduledMessageDBRepository) GetMessagesReadyForDispatch(limit i
 		messages = append(messages, message)
 	}
 	return messages
-}
-
-// GetAndClaimMessagesForDispatch atomically retrieves and claims scheduled messages ready for dispatch.
-// This method uses SELECT ... FOR UPDATE SKIP LOCKED to ensure each replica gets disjoint rows,
-// preventing duplicate message creation race conditions.
-func (msgRepo *ScheduledMessageDBRepository) GetAndClaimMessagesForDispatch(limit int) ([]*data.ScheduledMessage, error) {
-	type messageWithIDs struct {
-		message    *data.ScheduledMessage
-		producerID string
-		channelID  string
-	}
-
-	var messagesWithIDs []messageWithIDs
-	dispatchedAt := time.Now()
-
-	// Use transactionalOperations to handle transaction lifecycle
-	err := transactionalOperations(msgRepo.db, func(tx *sql.Tx) error {
-		// SELECT with FOR UPDATE SKIP LOCKED — each replica gets disjoint rows
-		query := fmt.Sprintf("%s status = ? AND dispatchSchedule <= ? ORDER BY dispatchSchedule ASC LIMIT %d FOR UPDATE SKIP LOCKED", scheduledMessageSelectRowCommonQuery, limit)
-		log.Debug().Str("query", query).Int("limit", limit).Msg("Claiming scheduled messages for dispatch")
-
-		rows, err := tx.Query(query, data.ScheduledMsgStatusScheduled.GetValue(), time.Now())
-		if err != nil {
-			log.Error().Err(err).Msg("Error querying for scheduled messages to claim")
-			return err
-		}
-		defer rows.Close()
-
-		var idsToUpdate []string
-
-		for rows.Next() {
-			var producerID string
-			var channelID string
-			var nullDispatchedDate sql.NullTime
-			message := &data.ScheduledMessage{}
-			err := rows.Scan(&message.ID, &message.MessageID, &producerID, &channelID, &message.Payload, &message.ContentType, &message.Priority, &message.Status, &message.DispatchSchedule, &nullDispatchedDate, &message.Headers, &message.CreatedAt, &message.UpdatedAt)
-			if err != nil {
-				log.Error().Err(err).Msg("Error scanning scheduled message for claiming")
-				return err
-			}
-			if nullDispatchedDate.Valid {
-				message.DispatchedAt = nullDispatchedDate.Time
-			}
-
-			idsToUpdate = append(idsToUpdate, message.ID.String())
-			messagesWithIDs = append(messagesWithIDs, messageWithIDs{
-				message:    message,
-				producerID: producerID,
-				channelID:  channelID,
-			})
-		}
-
-		if err = rows.Err(); err != nil {
-			log.Error().Err(err).Msg("Error iterating scheduled message rows")
-			return err
-		}
-
-		if len(idsToUpdate) == 0 {
-			// No messages to claim
-			return nil
-		}
-
-		// Atomically claim: flip status to DISPATCHED in same transaction
-		placeholders := make([]string, len(idsToUpdate))
-		args := make([]interface{}, 0, len(idsToUpdate)+2)
-		args = append(args, data.ScheduledMsgStatusDispatched.GetValue(), dispatchedAt)
-
-		for i, id := range idsToUpdate {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-
-		updateQuery := fmt.Sprintf("UPDATE scheduled_message SET status = ?, dispatchedAt = ? WHERE id IN (%s)", strings.Join(placeholders, ", "))
-		result, err := tx.Exec(updateQuery, args...)
-		if err != nil {
-			log.Error().Err(err).Msg("Error updating claimed scheduled messages")
-			return err
-		}
-
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			log.Error().Err(err).Msg("Error getting rows affected for claim update")
-			return err
-		}
-
-		log.Debug().Int64("rowsAffected", rowsAffected).Int("expected", len(idsToUpdate)).Msg("Claimed scheduled messages")
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	// After transaction commits, load Producer and Channel relationships
-	// This is done outside the transaction since these are separate queries
-	var finalMessages []*data.ScheduledMessage
-	for _, msgWithIDs := range messagesWithIDs {
-		message := msgWithIDs.message
-
-		// Set the dispatched status and time that were set in the transaction
-		message.Status = data.ScheduledMsgStatusDispatched
-		message.DispatchedAt = dispatchedAt
-
-		// Load producer
-		producer, err := msgRepo.producerRepository.Get(msgWithIDs.producerID)
-		if err != nil {
-			log.Error().Err(err).Str("producerId", msgWithIDs.producerID).Msg("Error retrieving producer for claimed message")
-			continue
-		}
-		message.ProducedBy = producer
-
-		// Load channel
-		channel, err := msgRepo.channelRepository.Get(msgWithIDs.channelID)
-		if err != nil {
-			log.Error().Err(err).Str("channelId", msgWithIDs.channelID).Msg("Error retrieving channel for claimed message")
-			continue
-		}
-		message.BroadcastedTo = channel
-
-		finalMessages = append(finalMessages, message)
-	}
-
-	log.Info().Int("claimed", len(finalMessages)).Msg("Successfully claimed and loaded scheduled messages")
-	return finalMessages, nil
 }
 
 // GetScheduledMessagesForChannel retrieves scheduled messages for a specific channel with optional status filters
