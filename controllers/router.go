@@ -35,7 +35,7 @@ var (
 	ControllerInjector = wire.NewSet(ConfigureAPI, NewRouter, NewStatusController, NewProducersController, NewProducerController, NewChannelController, NewChannelsController, NewConsumerController, NewConsumersController, NewJobsController, NewJobController, NewBroadcastController, NewMessageController, NewMessagesController, NewMessagesStatusController, NewDLQController, NewJobRequeueController, NewJobStatusController, NewScheduledMessageController, NewScheduledMessagesController, NewDLQStatusController, NewDLQPurgeController, NewDeadJobDeleteController, wire.Struct(new(Controllers), "StatusController", "ProducersController", "ProducerController", "ChannelController", "ConsumerController", "ConsumersController", "JobsController", "JobController", "BroadcastController", "MessageController", "MessagesController", "DLQController", "ChannelsController", "MessagesStatusController", "JobRequeueController", "JobStatusController", "ScheduledMessageController", "ScheduledMessagesController", "DLQStatusController", "DLQPurgeController", "DeadJobDeleteController", "MetricsHandler"))
 	// ErrUnsupportedMediaType is returned when client does not provide appropriate `Content-Type` header
 	ErrUnsupportedMediaType = errors.New("Media type not supported")
-	// ErrConditionalFailed is returned when update is missing `If-Unmodified-Since` header
+	// ErrConditionalFailed is returned when an update's `If-Unmodified-Since` header does not match the resource's last-modified time
 	ErrConditionalFailed = errors.New("Update failed due to mismatch of `If-Unmodified-Since` header value")
 	// ErrNotFound is returned when resource is not found
 	ErrNotFound = errors.New("Request resource not found")
@@ -321,7 +321,7 @@ func writeUnsupportedMediaType(w http.ResponseWriter) {
 }
 
 func writePreconditionFailed(w http.ResponseWriter) {
-	writeStatus(w, http.StatusPreconditionFailed, ErrUnsupportedMediaType)
+	writeStatus(w, http.StatusPreconditionFailed, ErrConditionalFailed)
 }
 
 func writeStatus(w http.ResponseWriter, code int, err error) {

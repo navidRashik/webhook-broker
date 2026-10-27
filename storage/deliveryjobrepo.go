@@ -232,6 +232,63 @@ func (djRepo *DeliveryJobDBRepository) GetJobsForMessage(message *data.Message, 
 	return djRepo.getJobs(baseQuery, message, nil, appendWithPaginationArgs(page, message.ID.String()))
 }
 
+// getJobsForMessagesChunkSize bounds the number of message ids per IN() query so a single
+// statement stays within driver placeholder/packet limits while collapsing what used to be
+// one query per message into a handful of queries per prune batch. It is kept at MySQL's
+// default eq_range_index_dive_limit (200): at or below it the optimizer dives the index per
+// value and estimates rows accurately, so it reliably picks the jobs_by_message index; above
+// it the optimizer falls back to index statistics and could mis-plan. The cost of the smaller
+// chunk is only a few extra round-trips per page, negligible against the ~2000 this removes.
+const getJobsForMessagesChunkSize = 200
+
+// GetJobsForMessages retrieves all delivery jobs for the given message ids grouped by message id,
+// issuing at most one query per getJobsForMessagesChunkSize ids. It exists for batch workloads
+// such as pruning where GetJobsForMessage's one-query-per-message cost dominates runtime. The
+// returned jobs have Listener populated; Message carries only its ID so callers that already hold
+// the parent message can attach it without an extra lookup. The result holds every job for the
+// whole id set at once, so peak memory is bounded by len(messageIDs) * consumers-per-channel.
+// Generated with assistance from Claude AI
+func (djRepo *DeliveryJobDBRepository) GetJobsForMessages(messageIDs []string) (map[string][]*data.DeliveryJob, error) {
+	jobsByMessage := make(map[string][]*data.DeliveryJob, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return jobsByMessage, nil
+	}
+	for start := 0; start < len(messageIDs); start += getJobsForMessagesChunkSize {
+		end := min(start+getJobsForMessagesChunkSize, len(messageIDs))
+		chunk := messageIDs[start:end]
+		query := jobCommonSelectQuery + " messageId IN (" + placeholders(len(chunk)) + ")"
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		chunkJobs := make([]*data.DeliveryJob, 0, len(chunk))
+		scanArgs := func() []interface{} {
+			job := &data.DeliveryJob{}
+			job.Message = &data.Message{}
+			job.Listener = &data.Consumer{}
+			chunkJobs = append(chunkJobs, job)
+			return []interface{}{&job.ID, &job.Message.ID, &job.Listener.ID, &job.Status, &job.DispatchReceivedAt, &job.RetryAttemptCount, &job.StatusChangedAt, &job.EarliestNextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Priority, &job.IncrementalTimeout}
+		}
+		if err := queryRows(djRepo.db, query, args2SliceFnWrapper(args...), scanArgs); err != nil {
+			log.Error().Err(err).Msg("error - could not batch list jobs for messages")
+			return nil, err
+		}
+		for _, job := range chunkJobs {
+			listener, listenerErr := djRepo.consumerRepository.GetByID(job.Listener.ID.String())
+			if listenerErr != nil {
+				// Prune archives before it deletes; a missing listener here means the job would be
+				// archived with a null consumer and then removed, so surface it rather than swallow.
+				log.Error().Err(listenerErr).Str("jobId", job.ID.String()).Str("consumerId", job.Listener.ID.String()).Msg("error - could not load listener for job while batch listing jobs for messages")
+			} else {
+				job.Listener = listener
+			}
+			msgID := job.Message.ID.String()
+			jobsByMessage[msgID] = append(jobsByMessage[msgID], job)
+		}
+	}
+	return jobsByMessage, nil
+}
+
 // RequeueDeadJobsForConsumer queues up dead jobs for a specific consumer; returns rows affected
 func (djRepo *DeliveryJobDBRepository) RequeueDeadJobsForConsumer(consumer *data.Consumer) (int64, error) {
 	currentTime := time.Now()
@@ -276,11 +333,17 @@ func (djRepo *DeliveryJobDBRepository) GetJobsForConsumer(consumer *data.Consume
 	return djRepo.getJobs(baseQuery, nil, consumer, appendWithPaginationArgs(page, consumer.ID.String(), jobStatus))
 }
 
+// prioritizedJobsForConsumerQuery backs GetPrioritizedJobsForConsumer (and its plan
+// regression test). It uses `=` (not `like`) on consumerId so the equality lets the DB
+// satisfy the ORDER BY from the job_consumer_status_priority index (migration 000013)
+// instead of filesorting the consumer's entire QUEUED backlog -> O(backlog) latency ->
+// 504 for busy consumers. A `like` on the leading column is treated as a range, which
+// defeats the index-ordered sort. consumerId is always an exact xid, so `=` is equivalent.
+const prioritizedJobsForConsumerQuery = jobCommonSelectQuery + " consumerId = ? AND status = ? ORDER BY priority DESC, createdAt DESC, id DESC LIMIT ?"
+
 // GetPrioritizedJobsForConsumer retrieves DeliveryJob created for delivery to a customer and it has to be filtered by a specific status and ordered by message priority
 func (djRepo *DeliveryJobDBRepository) GetPrioritizedJobsForConsumer(consumer *data.Consumer, jobStatus data.JobStatus, pageSize int) ([]*data.DeliveryJob, error) {
-	orderClause := "ORDER BY priority DESC, createdAt DESC, id DESC"
-	baseQuery := jobCommonSelectQuery + " consumerId like ? AND status = ? " + orderClause + " LIMIT ?"
-	jobs, _, err := djRepo.getJobs(baseQuery, nil, consumer, args2SliceFnWrapper(consumer.ID.String(), jobStatus, pageSize)())
+	jobs, _, err := djRepo.getJobs(prioritizedJobsForConsumerQuery, nil, consumer, args2SliceFnWrapper(consumer.ID.String(), jobStatus, pageSize)())
 	return jobs, err
 }
 

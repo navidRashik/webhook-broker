@@ -102,7 +102,7 @@ func (controller *ConsumerController) Delete(w http.ResponseWriter, r *http.Requ
 	switch err {
 	case nil:
 		if validRequest := isConditionalUpdateCalled(w, r, consumer); !validRequest {
-			writePreconditionFailed(w)
+			return
 		} else if delErr := controller.ConsumerRepo.Delete(consumer); delErr != nil {
 			writeErr(w, delErr)
 		} else {

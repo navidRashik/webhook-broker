@@ -4,6 +4,14 @@ UNAME_S := $(shell uname -s)
 
 ARCH := $(shell arch)
 
+RACE := -race
+ifeq ($(ARCH),aarch64)
+RACE :=
+endif
+ifeq ($(ARCH),arm64)
+RACE :=
+endif
+
 OS := $(shell test -f /etc/os-release && cat /etc/os-release | grep '^NAME' | sed -e 's/NAME="\(.*\)"/\1/g')
 
 all: clean os-deps dep-tools deps test build
@@ -98,9 +106,11 @@ time-test:
 
 ci-test:
 	go test -timeout 45s -mod=readonly -v ./... -short
+	go test -v $(RACE) -timeout 45s -mod=readonly -run '_Race' ./...
 
 test:
 	go test -v -timeout 45s -mod=readonly ./...
+	go test -v $(RACE) -timeout 45s -mod=readonly -run '_Race' ./...
 
 install: build
 	go install -mod=readonly

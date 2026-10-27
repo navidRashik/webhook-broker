@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -67,3 +68,52 @@ func TestMemoryCache(t *testing.T) {
 	})
 }
 
+func TestMemoryCache_Race(t *testing.T) {
+	t.Run("ConcurrentGetExpired", func(t *testing.T) {
+		cache := NewMemoryCache[string, int](time.Hour)
+		defer cache.Close()
+
+		// Insert an already-expired item, then read it from many goroutines at once.
+		cache.cache["k"] = &CacheItem[string, int]{Value: 1, Expiration: time.Now().Add(-time.Minute)}
+
+		var wg sync.WaitGroup
+		for range 10 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, ok := cache.Get("k")
+				assert.False(t, ok)
+			}()
+		}
+		wg.Wait()
+	})
+
+	t.Run("ConcurrentGetSetDelete", func(t *testing.T) {
+		// Short TTL so the cleanup goroutine also runs during the test.
+		cache := NewMemoryCache[int, int](10 * time.Millisecond)
+		defer cache.Close()
+
+		const keys = 8
+		var wg sync.WaitGroup
+		for g := range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range 500 {
+					k := (g + i) % keys
+					switch i % 3 {
+					case 0:
+						cache.Set(k, k)
+					case 1:
+						if v, ok := cache.Get(k); ok {
+							assert.Equal(t, k, v)
+						}
+					case 2:
+						cache.Delete(k)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	})
+}

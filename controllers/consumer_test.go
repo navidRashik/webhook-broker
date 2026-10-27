@@ -270,6 +270,7 @@ func TestConsumerDelete(t *testing.T) {
 		rr := httptest.NewRecorder()
 		testRouter.ServeHTTP(rr, req)
 		assert.Equal(t, http.StatusPreconditionFailed, rr.Code)
+		assert.Equal(t, ErrConditionalFailed.Error(), rr.Body.String())
 	})
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
@@ -578,6 +579,7 @@ func TestConsumerPut(t *testing.T) {
 		rr := httptest.NewRecorder()
 		testRouter.ServeHTTP(rr, req)
 		assert.Equal(t, http.StatusPreconditionFailed, rr.Code)
+		assert.Equal(t, ErrConditionalFailed.Error(), rr.Body.String())
 	})
 	t.Run("500", func(t *testing.T) {
 		t.Parallel()

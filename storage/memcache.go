@@ -46,8 +46,6 @@ func (c *MemoryCache[K, V]) Get(key K) (V, bool) {
 		if c.ttl == 0 || time.Now().Before(item.Expiration) { // Check for expiration
 			return item.Value, true
 		}
-		// Remove expired items since they aren't going to be returned
-		delete(c.cache, key)
 	}
 	var emptyValue V
 	return emptyValue, false
